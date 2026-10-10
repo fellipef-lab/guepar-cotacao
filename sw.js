@@ -30,11 +30,13 @@ self.addEventListener("notificationclick", e => {
   }));
 });
 
-const CACHE = "frota-v1";
+const CACHE = "frota-v2";
 const ARQUIVOS = ["./", "index.html", "app.js", "config.js", "manifest.json", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ARQUIVOS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then(c => c.addAll(ARQUIVOS.map(a => new Request(a, { cache: "reload" }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", e => {
@@ -56,10 +58,11 @@ self.addEventListener("fetch", e => {
   // Banco de dados, fotos e mapa vão direto para a internet
 });
 
-// Arquivos do app: tenta a versão nova; sem internet, usa a guardada
+// Arquivos do app: sempre confere no servidor se há versão nova (ignora o cache de 10 min
+// do GitHub Pages); sem internet, usa a guardada
 async function redePrimeiro(r) {
   try {
-    const resp = await fetch(r);
+    const resp = await fetch(r, { cache: "no-cache" });
     if (resp.ok) (await caches.open(CACHE)).put(r, resp.clone());
     return resp;
   } catch (e) {
