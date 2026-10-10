@@ -1,1 +1,0 @@
-# guepar-cotacao
