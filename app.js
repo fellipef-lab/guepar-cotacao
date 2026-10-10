@@ -6,6 +6,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getAuth, onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut,
+  EmailAuthProvider, reauthenticateWithCredential, updatePassword, verifyBeforeUpdateEmail, sendPasswordResetEmail,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
@@ -29,6 +30,7 @@ let fb, auth, db, messaging = null;
 if (CONFIGURADO) {
   fb = initializeApp(C.firebase);
   auth = getAuth(fb);
+  auth.languageCode = "pt-BR"; // e-mails de senha/confirmação em português
   try {
     // Cache local: o app abre e registra dados mesmo sem internet, e sincroniza depois
     db = initializeFirestore(fb, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
@@ -114,6 +116,10 @@ function erroMsg(e, padrao) {
   if (["auth/invalid-credential", "auth/wrong-password", "auth/user-not-found", "auth/invalid-email"].includes(c)) return "E-mail ou senha incorretos.";
   if (c === "auth/admin-restricted-operation" || c === "auth/operation-not-allowed") return "Esse tipo de login não está ativado no Firebase (veja o LEIA-ME).";
   if (c === "auth/too-many-requests") return "Muitas tentativas. Aguarde alguns minutos.";
+  if (c === "auth/weak-password") return "Senha fraca: use pelo menos 6 caracteres.";
+  if (c === "auth/email-already-in-use") return "Esse e-mail já é usado por outra conta.";
+  if (c === "auth/requires-recent-login") return "Por segurança, saia e entre de novo antes de fazer isso.";
+  if (c === "auth/missing-password") return "Digite a senha.";
   if (m && !m.startsWith("Firebase")) return m;
   return padrao || "Algo deu errado. Tente de novo.";
 }
@@ -138,7 +144,7 @@ function modal(html, { onClose } = {}) {
 /* ================== ESTADO E NAVEGAÇÃO ================== */
 const S = {
   user: null, admin: false, me: null,
-  carros: [], motoristas: [], usosAtivos: [], reservas: [], usoAtivo: null,
+  carros: [], motoristas: [], usosAtivos: [], reservas: [], convites: [], usoAtivo: null,
   view: null, live: false, tab: getLS("frota_tab") || "carros",
   subs: [], pushSuportado: false, pushOk: getLS("frota_push") === "1",
 };
@@ -170,6 +176,8 @@ window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); prompt
 const linkBase = () => location.origin + location.pathname;
 const linkCarro = c => `${linkBase()}#carro=${c.codigo}`;
 const codigoDoLink = () => { const m = /carro=([A-Z0-9]{6})/i.exec(location.hash); return m ? m[1].toUpperCase() : null; };
+const conviteDoLink = () => { const m = /convite=([A-Z0-9]{8})/i.exec(location.hash); return m ? m[1].toUpperCase() : null; };
+const linkConvite = cod => `${linkBase()}#convite=${cod}`;
 const pedeAdmin = () => /^#admin/i.test(location.hash);
 const limparHash = () => history.replaceState(null, "", location.pathname + location.search);
 
@@ -178,13 +186,16 @@ async function iniciar() {
   if (!CONFIGURADO) return telaSemConfig();
   S.user = await new Promise(r => { const off = onAuthStateChanged(auth, u => { off(); r(u); }); });
   await prepararPush();
-  const querAdmin = pedeAdmin(), cod = codigoDoLink();
-  if (querAdmin || cod) limparHash();
+  const querAdmin = pedeAdmin(), cod = codigoDoLink(), conv = conviteDoLink();
+  if (querAdmin || cod || conv) limparHash();
   if (querAdmin || getLS("frota_modo") === "admin") {
-    if (cod) setTimeout(() => toast("Este aparelho está como administrador. Para pegar o carro, use o celular do motorista.", 6000), 800);
+    if (cod || conv) setTimeout(() => toast(conv
+      ? "Este link é um convite de motorista: abra no celular do motorista."
+      : "Este aparelho está como administrador. Para pegar o carro, use o celular do motorista.", 6000), 800);
     return entrarAdmin();
   }
   S.qrPendente = cod;
+  S.convitePendente = conv;
   entrarMotorista();
 }
 
@@ -192,6 +203,14 @@ async function iniciar() {
 window.addEventListener("hashchange", () => {
   if (!CONFIGURADO) return;
   if (pedeAdmin()) { limparHash(); if (!S.admin) entrarAdmin(); return; }
+  const conv = conviteDoLink();
+  if (conv) {
+    limparHash();
+    if (S.admin) return toast("Este link é um convite de motorista: abra no celular do motorista.", 6000);
+    if (S.me) return toast(`Este celular já está identificado como ${S.me.nome}.`, 5000);
+    S.convitePendente = conv;
+    return entrarMotorista();
+  }
   const cod = codigoDoLink();
   if (!cod) return;
   limparHash();
@@ -297,12 +316,36 @@ async function entrarMotorista() {
     return true;
   });
   if (!ok) return telaSemConexao();
+  if (S.convitePendente) {
+    const conv = S.convitePendente; S.convitePendente = null;
+    if (S.me) toast(`Este celular já está identificado como ${S.me.nome}.`, 5000);
+    else if (await aceitarConvite(conv)) toast(`Bem-vindo, ${primeiroNome(S.me.nome)}!`, 4000);
+  }
   if (!S.me) return go(telaIdentificar);
   semEsperar(updateDoc(meRef(), { ultimoUso: serverTimestamp() }));
   if (messaging && S.pushOk && Notification.permission === "granted") registrarToken().catch(() => {});
   ouvirMotorista();
   go(telaMotorista);
   processarQRPendente();
+}
+
+// Convite criado pelo administrador: o motorista entra já identificado (nome e WhatsApp do cadastro)
+async function aceitarConvite(cod) {
+  ocupado("Ativando seu acesso…");
+  return tentar(async () => {
+    const ref = doc(db, "convites", cod);
+    const c = await getDoc(ref);
+    if (!c.exists() || c.data().usadoPor) throw new Error("Convite inválido ou já usado. Peça um novo ao administrador.");
+    const d = c.data({ serverTimestamps: "estimate" });
+    if (Date.now() - (ms(d.criadoEm) || 0) > 7 * 864e5) throw new Error("Convite vencido. Peça um novo ao administrador.");
+    const novo = { nome: d.nome, telefone: d.telefone || "", disponivelEm: null, ultimoUso: serverTimestamp(), criadoEm: serverTimestamp(), tokens: [] };
+    const b = writeBatch(db);
+    b.set(meRef(), novo);
+    b.update(ref, { usadoPor: S.user.uid, usadoEm: serverTimestamp() });
+    await b.commit();
+    S.me = { id: S.user.uid, ...novo, ultimoUso: Date.now(), criadoEm: Date.now() };
+    return true;
+  }, "Não foi possível ativar o convite. Tente de novo.");
 }
 
 function ouvirMotorista() {
@@ -946,7 +989,15 @@ function telaLogin() {
       <label for="lSenha">Senha</label>
       <input id="lSenha" type="password" autocomplete="current-password">
       <button class="btn" id="lEntrar">Entrar</button>
+      <button class="btn sec" id="lEsqueci">Esqueci minha senha</button>
     </div>`;
+  $("#lEsqueci").onclick = async () => {
+    const email = $("#lEmail").value.trim();
+    if (!email) return toast("Digite seu e-mail no campo acima");
+    ocupado("Enviando…");
+    const ok = await tentar(async () => { await sendPasswordResetEmail(auth, email); return true; });
+    if (ok) toast("Se esse e-mail for de um administrador, chega um link para criar uma nova senha. Veja também o spam.", 7000);
+  };
   const entrar = async () => {
     const email = $("#lEmail").value.trim(), senha = $("#lSenha").value;
     if (!email || !senha) return toast("Preencha e-mail e senha");
@@ -963,6 +1014,18 @@ function ouvirAdmin() {
   pararOuvintes();
   ouvir(collection(db, "carros"), s => { S.carros = lista(s).sort(porNome); reRender(); });
   ouvir(collection(db, "motoristas"), s => { S.motoristas = lista(s).sort(porNome); reRender(); });
+  ouvir(collection(db, "convites"), s => {
+    S.convites = lista(s).sort((a, b) => ms(b.criadoEm) - ms(a.criadoEm));
+    // Convite usado: apaga o convite e, se era troca de celular, o cadastro do aparelho antigo
+    S.convites.filter(c => c.usadoPor).forEach(c => {
+      const b = writeBatch(db);
+      const antigoComCarro = S.usosAtivos.some(u => u.motoristaId === c.substitui);
+      if (c.substitui && c.substitui !== c.usadoPor && !antigoComCarro) b.delete(doc(db, "motoristas", c.substitui));
+      b.delete(doc(db, "convites", c.id));
+      semEsperar(b.commit());
+    });
+    reRender();
+  });
   ouvir(query(collection(db, "usos"), where("fim", "==", null)), s => { S.usosAtivos = lista(s); reRender(); atualizarMapa(); });
   ouvir(query(collection(db, "reservas"), where("fim", ">=", Timestamp.now())), s => {
     S.reservas = lista(s).filter(r => r.status === "ativa").sort((a, b) => ms(a.inicio) - ms(b.inicio));
@@ -1112,7 +1175,20 @@ function telaEtiquetas(carros) {
 function abaMotoristas(el) {
   const dias = +(getLS("frota_dias_alerta") || 3);
   const ordenados = [...S.motoristas].sort((a, b) => ((b.disponivelEm === hoje()) - (a.disponivelEm === hoje())) || porNome(a, b));
-  el.innerHTML = `<div class="card"><p class="muted" style="margin-top:0">Os motoristas se cadastram sozinhos pelo app.</p>
+  const pendentes = S.convites.filter(c => !c.usadoPor);
+  el.innerHTML = `
+    <button class="btn" id="novoMot" style="margin-bottom:14px">＋ Cadastrar motorista</button>
+    ${pendentes.length ? `<div class="card"><h2>📨 Convites aguardando</h2><ul class="list">${pendentes.map(c => {
+      const vencido = Date.now() - (ms(c.criadoEm) || 0) > 7 * 864e5;
+      return `<li class="item"><div class="info">
+          <div class="title">${esc(c.nome)} ${c.substitui ? `<span class="pill uso">Novo celular</span>` : ""} ${vencido ? `<span class="pill bad">Vencido</span>` : ""}</div>
+          <div class="muted">Criado ${ago(c.criadoEm)} · ainda não abriu o link</div>
+        </div><div class="acts">
+          ${vencido ? "" : `<button class="mini" data-verconv="${c.id}">Ver / enviar</button>`}
+          <button class="mini del" data-delconv="${c.id}" title="Cancelar convite">✕</button>
+        </div></li>`;
+    }).join("")}</ul></div>` : ""}
+    <div class="card">
     ${ordenados.length ? `<ul class="list">${ordenados.map(m => {
       const uso = S.usosAtivos.find(u => u.motoristaId === m.id);
       const inativo = Date.now() - (ms(m.ultimoUso) || ms(m.criadoEm) || 0) > dias * 864e5;
@@ -1121,19 +1197,80 @@ function abaMotoristas(el) {
           <div class="title">${esc(m.nome)}
             ${uso ? `<span class="pill uso">Com ${esc(uso.carroNome)}</span>` : m.disponivelEm === hoje() ? `<span class="pill ok">Disponível hoje</span>` : ""}
             ${inativo ? `<span class="pill warn">Inativo</span>` : ""}
-            ${(m.tokens || []).length ? "" : `<span class="pill off" title="Não ativou as notificações">🔕</span>`}
           </div>
           <div class="muted">${m.telefone ? esc(m.telefone) + " · " : ""}Último uso: ${ago(m.ultimoUso)}</div>
         </div>
         <div class="acts">
           ${m.telefone ? `<a class="mini" target="_blank" rel="noopener" href="${waLink(m.telefone)}">💬 WhatsApp</a>` : ""}
+          <button class="mini" data-edit="${m.id}">Editar</button>
           <button class="mini del" data-del="${m.id}" title="Remover">✕</button>
         </div></li>`;
-    }).join("")}</ul>` : `<div class="empty">Nenhum motorista cadastrado ainda.</div>`}</div>`;
+    }).join("")}</ul>` : `<div class="empty">Nenhum motorista ainda. Cadastre ou mande o link do app para eles.</div>`}</div>`;
+  $("#novoMot").onclick = () => go(telaMotoristaForm, null);
+  $$("[data-edit]", el).forEach(b => b.onclick = () => go(telaMotoristaForm, S.motoristas.find(x => x.id === b.dataset.edit)));
+  $$("[data-verconv]", el).forEach(b => b.onclick = () => { const c = S.convites.find(x => x.id === b.dataset.verconv); go(telaConvite, { codigo: c.id, nome: c.nome, telefone: c.telefone }); });
+  $$("[data-delconv]", el).forEach(b => b.onclick = () => { if (confirm("Cancelar este convite? O link deixa de funcionar.")) semEsperar(deleteDoc(doc(db, "convites", b.dataset.delconv))); });
   $$("[data-del]", el).forEach(b => b.onclick = () => {
     const m = S.motoristas.find(x => x.id === b.dataset.del);
+    if (S.usosAtivos.some(u => u.motoristaId === m.id)) return toast("Esse motorista está com um carro. Encerre o uso antes.");
     if (confirm(`Remover o motorista ${m.nome}?`)) semEsperar(deleteDoc(doc(db, "motoristas", m.id)));
   });
+}
+
+function telaMotoristaForm(m) {
+  topo(m ? "Editar motorista" : "Cadastrar motorista", [["Voltar", () => go(telaAdmin)]]);
+  app.innerHTML = `
+    <div class="card">
+      <label for="mNome">Nome</label>
+      <input id="mNome" maxlength="60" placeholder="Ex.: João Silva" value="${esc(m?.nome || "")}">
+      <label for="mTel">WhatsApp (com DDD)</label>
+      <input id="mTel" type="tel" inputmode="tel" maxlength="20" placeholder="Ex.: 11 91234-5678" value="${esc(m?.telefone || "")}">
+      <button class="btn" id="mSalvar">${m ? "Salvar" : "Cadastrar e gerar convite"}</button>
+      ${m ? "" : `<p class="muted">O motorista recebe um link. Ao abrir no celular dele, entra já identificado, sem digitar nada.</p>`}
+    </div>
+    ${m ? `<div class="card"><h2>📲 Trocou de celular?</h2>
+      <p class="muted">Gere um link para o celular novo. Quando o motorista abrir, o cadastro passa para o aparelho novo e o antigo é desligado.</p>
+      <button class="btn sec" id="mNovoCel">Gerar link para o novo celular</button></div>` : ""}`;
+  $("#mSalvar").onclick = () => {
+    const nome = $("#mNome").value.trim().replace(/\s+/g, " "), telefone = $("#mTel").value.trim();
+    if (nome.length < 2) return toast("Digite o nome");
+    if (telefone && soDigitos(telefone).length < 10) return toast("Confira o WhatsApp com DDD");
+    if (m) {
+      semEsperar(updateDoc(doc(db, "motoristas", m.id), { nome, telefone }));
+      toast("Motorista atualizado");
+      return go(telaAdmin);
+    }
+    criarConvite({ nome, telefone });
+  };
+  $("#mNovoCel") && ($("#mNovoCel").onclick = () => criarConvite({ nome: m.nome, telefone: m.telefone || "", substitui: m.id }));
+}
+
+function criarConvite(d) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const codigo = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  semEsperar(setDoc(doc(db, "convites", codigo), {
+    nome: d.nome, telefone: d.telefone || "", substitui: d.substitui || null,
+    usadoPor: null, usadoEm: null, criadoEm: serverTimestamp(),
+  }));
+  go(telaConvite, { codigo, nome: d.nome, telefone: d.telefone });
+}
+
+function telaConvite(c) {
+  topo("📨 Convite", [["Voltar", () => go(telaAdmin)]]);
+  const link = linkConvite(c.codigo);
+  const msg = `Olá ${primeiroNome(c.nome)}! Este é o seu acesso ao app da frota. Abra no seu celular: ${link}`;
+  app.innerHTML = `
+    <div class="card center">
+      <h2>Convite de ${esc(c.nome)}</h2>
+      <p class="muted">Mande o link para o celular do motorista ou peça para ele apontar a câmera para o QR Code abaixo. Vale por 7 dias e só pode ser usado uma vez.</p>
+      <img src="${qrDataURL(link, 6)}" alt="QR Code do convite" style="width:220px;max-width:100%;image-rendering:pixelated;background:#fff;padding:8px;border-radius:10px">
+      <input readonly value="${esc(link)}" onclick="this.select()" style="margin-top:10px">
+      ${c.telefone ? `<a class="btn ok" target="_blank" rel="noopener" href="${waLink(c.telefone, msg)}">💬 Enviar pelo WhatsApp</a>` : ""}
+      <button class="btn sec" id="copiar">📋 Copiar link</button>
+    </div>`;
+  $("#copiar").onclick = async () => {
+    try { await navigator.clipboard.writeText(link); toast("Link copiado"); } catch (e) { toast("Toque no link acima e copie"); }
+  };
 }
 
 /* ---------- Aba Mapa (rastreamento) ---------- */
@@ -1330,11 +1467,42 @@ function abaAjustes(el) {
       ${cardInstalar()}
     </div>
     <div class="card">
-      <h2>Conta</h2>
-      <p class="muted">Conectado como ${esc(S.user?.email || "")}. O login fica salvo neste aparelho.</p>
+      <h2>Minha conta</h2>
+      <p class="muted">Conectado como <b>${esc(S.user?.email || "")}</b>. O login fica salvo neste aparelho.</p>
+      <label for="cSenhaAtual">Senha atual (necessária para qualquer mudança)</label>
+      <input id="cSenhaAtual" type="password" autocomplete="current-password">
+      <label for="cSenhaNova">Nova senha</label>
+      <input id="cSenhaNova" type="password" autocomplete="new-password" placeholder="Mínimo 6 caracteres">
+      <label for="cSenhaNova2">Repita a nova senha</label>
+      <input id="cSenhaNova2" type="password" autocomplete="new-password">
+      <button class="btn sec" id="trocarSenha">🔑 Trocar senha</button>
+      <label for="cEmailNovo" style="margin-top:16px">Novo e-mail de login</label>
+      <input id="cEmailNovo" type="email" inputmode="email" autocomplete="off">
+      <button class="btn sec" id="trocarEmail">✉️ Trocar e-mail</button>
+      <p class="muted">Ao trocar o e-mail, chega um link de confirmação no e-mail novo. O login só muda depois que você clicar nele; depois disso, entre de novo com o e-mail novo.</p>
       <button class="btn bad" id="sair">Sair da administração</button>
     </div>`;
   ligarInstalar();
+  const reautenticar = async () => {
+    const senha = $("#cSenhaAtual").value;
+    if (!senha) throw new Error("Digite a senha atual.");
+    await reauthenticateWithCredential(auth.currentUser, EmailAuthProvider.credential(auth.currentUser.email, senha));
+  };
+  $("#trocarSenha").onclick = async () => {
+    const nova = $("#cSenhaNova").value;
+    if (nova.length < 6) return toast("A nova senha precisa ter pelo menos 6 caracteres");
+    if (nova !== $("#cSenhaNova2").value) return toast("As duas senhas novas não são iguais");
+    ocupado("Trocando a senha…");
+    const ok = await tentar(async () => { await reautenticar(); await updatePassword(auth.currentUser, nova); return true; });
+    if (ok) { ["#cSenhaAtual", "#cSenhaNova", "#cSenhaNova2"].forEach(s => { $(s).value = ""; }); toast("Senha alterada!", 4000); }
+  };
+  $("#trocarEmail").onclick = async () => {
+    const email = $("#cEmailNovo").value.trim();
+    if (!/^\S+@\S+\.\S+$/.test(email)) return toast("Digite um e-mail válido");
+    ocupado("Enviando confirmação…");
+    const ok = await tentar(async () => { await reautenticar(); await verifyBeforeUpdateEmail(auth.currentUser, email); return true; });
+    if (ok) { $("#cSenhaAtual").value = ""; toast(`Link enviado para ${email}. Clique nele para concluir a troca (veja também o spam).`, 8000); }
+  };
   $("#saveDias").onclick = () => {
     const n = parseInt($("#dias").value, 10);
     if (!(n >= 1 && n <= 60)) return toast("Use entre 1 e 60 dias");
