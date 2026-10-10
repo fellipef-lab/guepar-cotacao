@@ -163,15 +163,54 @@ const carroDoUso = u => S.carros.find(c => c.id === u.carroId) || { id: u.carroI
 let promptInstalar = null;
 window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); promptInstalar = e; $("#btnInstalar")?.classList.remove("hidden"); });
 
+/* Entrada:
+   - link normal ............ motorista (direto, sem tela de escolha)
+   - link + #admin .......... administrador (depois do 1º login, o aparelho já abre no painel)
+   - link + #carro=CODIGO ... QR Code da etiqueta: abre direto a retirada/devolução daquele carro */
+const linkBase = () => location.origin + location.pathname;
+const linkCarro = c => `${linkBase()}#carro=${c.codigo}`;
+const codigoDoLink = () => { const m = /carro=([A-Z0-9]{6})/i.exec(location.hash); return m ? m[1].toUpperCase() : null; };
+const pedeAdmin = () => /^#admin/i.test(location.hash);
+const limparHash = () => history.replaceState(null, "", location.pathname + location.search);
+
 async function iniciar() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(e => console.warn(e));
   if (!CONFIGURADO) return telaSemConfig();
   S.user = await new Promise(r => { const off = onAuthStateChanged(auth, u => { off(); r(u); }); });
   await prepararPush();
-  const modo = getLS("frota_modo");
-  if (modo === "motorista") return entrarMotorista();
-  if (modo === "admin") return entrarAdmin();
-  telaInicio();
+  const querAdmin = pedeAdmin(), cod = codigoDoLink();
+  if (querAdmin || cod) limparHash();
+  if (querAdmin || getLS("frota_modo") === "admin") {
+    if (cod) setTimeout(() => toast("Este aparelho está como administrador. Para pegar o carro, use o celular do motorista.", 6000), 800);
+    return entrarAdmin();
+  }
+  S.qrPendente = cod;
+  entrarMotorista();
+}
+
+// QR Code lido com o app já aberto (ou link aberto de novo)
+window.addEventListener("hashchange", () => {
+  if (!CONFIGURADO) return;
+  if (pedeAdmin()) { limparHash(); if (!S.admin) entrarAdmin(); return; }
+  const cod = codigoDoLink();
+  if (!cod) return;
+  limparHash();
+  if (S.admin) return toast("Este aparelho está como administrador. Para pegar o carro, use o celular do motorista.", 6000);
+  S.qrPendente = cod;
+  processarQRPendente();
+});
+
+async function processarQRPendente() {
+  const cod = S.qrPendente;
+  if (!cod || !S.me || S.admin) return;
+  S.qrPendente = null;
+  await S.pronto;
+  if (S.usoAtivo) {
+    const carro = carroDoUso(S.usoAtivo);
+    if (carro.codigo === cod) return devolverCarro(cod);
+    return toast(`Você está com o ${carro.nome}. Devolva-o antes de pegar outro carro.`, 5000);
+  }
+  pegarCarro(cod);
 }
 
 function telaSemConfig() {
@@ -180,30 +219,26 @@ function telaSemConfig() {
     <p class="muted">Preencha o arquivo <b>config.js</b> com os dados do seu projeto Firebase. O passo a passo está no arquivo <b>LEIA-ME.txt</b>.</p></div>`;
 }
 
-function telaInicio() {
+function telaSemConexao() {
   S.view = null; S.live = false;
   topo("🚗 Frota Disponível");
-  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
-  const instalado = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
-  app.innerHTML = `
-    <div class="card center">
-      <h2>Como você vai usar o app?</h2>
-      <p class="muted">Escolha uma vez. Neste aparelho isso fica salvo.</p>
-      <button class="btn big" id="goDriver">🧑‍✈️ Sou motorista</button>
-      <button class="btn sec" id="goAdmin">🔒 Administrador</button>
-    </div>
-    <button class="btn sec ${promptInstalar ? "" : "hidden"}" id="btnInstalar">📲 Instalar o app neste celular</button>
-    ${ios && !instalado ? `<p class="muted center">No iPhone: toque em <b>Compartilhar</b> e depois em <b>Adicionar à Tela de Início</b> para instalar e receber avisos.</p>` : ""}`;
-  $("#goDriver").onclick = entrarMotorista;
-  $("#goAdmin").onclick = entrarAdmin;
-  $("#btnInstalar").onclick = async () => { if (!promptInstalar) return; promptInstalar.prompt(); await promptInstalar.userChoice; promptInstalar = null; $("#btnInstalar").classList.add("hidden"); };
+  app.innerHTML = `<div class="card center"><h2>Não foi possível entrar</h2>
+    <p class="muted">Verifique a internet e tente de novo.</p>
+    <button class="btn" id="denovo">Tentar de novo</button></div>`;
+  $("#denovo").onclick = () => location.reload();
 }
 
-function trocarPerfil() {
-  if (!confirm("Voltar para a tela inicial?")) return;
-  pararOuvintes(); pararRastreio();
-  setLS("frota_modo", null);
-  telaInicio();
+// Cartão "Instalar o app" (aparece só quando ainda não está instalado)
+function cardInstalar() {
+  const instalado = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  if (instalado) return "";
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if (ios) return `<p class="muted center">📲 Para instalar no iPhone: toque em <b>Compartilhar</b> → <b>Adicionar à Tela de Início</b>.</p>`;
+  return `<button class="btn sec ${promptInstalar ? "" : "hidden"}" id="btnInstalar" style="margin-bottom:14px">📲 Instalar o app neste celular</button>`;
+}
+function ligarInstalar() {
+  const b = $("#btnInstalar");
+  if (b) b.onclick = async () => { if (!promptInstalar) return; promptInstalar.prompt(); await promptInstalar.userChoice; promptInstalar = null; b.classList.add("hidden"); };
 }
 
 /* ================== NOTIFICAÇÕES (PUSH) ================== */
@@ -261,18 +296,23 @@ async function entrarMotorista() {
     S.me = snap.exists() ? dados(snap) : null;
     return true;
   });
-  if (!ok) { setLS("frota_modo", null); return telaInicio(); }
+  if (!ok) return telaSemConexao();
   if (!S.me) return go(telaIdentificar);
   semEsperar(updateDoc(meRef(), { ultimoUso: serverTimestamp() }));
   if (messaging && S.pushOk && Notification.permission === "granted") registrarToken().catch(() => {});
   ouvirMotorista();
   go(telaMotorista);
+  processarQRPendente();
 }
 
 function ouvirMotorista() {
   pararOuvintes();
   const uid = S.user.uid;
+  // S.pronto: resolve quando carros e uso atual já chegaram pela 1ª vez (usado pelo QR Code)
+  let okCarros, okUso;
+  S.pronto = Promise.all([new Promise(r => { okCarros = r; }), new Promise(r => { okUso = r; })]);
   ouvir(collection(db, "carros"), snap => {
+    okCarros();
     // Aviso dentro do app quando um carro é liberado
     snap.docChanges().forEach(ch => {
       if (ch.type !== "modified") return;
@@ -290,6 +330,7 @@ function ouvirMotorista() {
   ouvir(query(collection(db, "usos"), where("motoristaId", "==", uid), where("fim", "==", null)), snap => {
     S.usoAtivo = snap.docs.length ? dados(snap.docs[0]) : null;
     S.usoAtivo ? iniciarRastreio() : pararRastreio();
+    okUso();
     reRender();
   });
   ouvir(query(collection(db, "reservas"), where("fim", ">=", Timestamp.now())), snap => {
@@ -299,8 +340,9 @@ function ouvirMotorista() {
 }
 
 function telaIdentificar(editar = false) {
-  topo(editar ? "Meus dados" : "🧑‍✈️ Motorista", editar ? [["Voltar", () => go(telaMotorista)]] : [["Voltar", trocarPerfil]]);
+  topo(editar ? "Meus dados" : "🧑‍✈️ Motorista", editar ? [["Voltar", () => go(telaMotorista)]] : []);
   app.innerHTML = `
+    ${!editar && S.qrPendente ? `<div class="alert"><b>📷 Quase lá!</b>Antes de pegar o carro, identifique-se. Depois disso a retirada continua sozinha.</div>` : ""}
     <div class="card">
       <h2>${editar ? "Meus dados" : "Identifique-se"}</h2>
       ${editar ? "" : `<p class="muted">Faça isso uma única vez. Seus dados ficam salvos neste celular.</p>`}
@@ -322,11 +364,16 @@ function telaIdentificar(editar = false) {
       return go(telaMotorista);
     }
     const novo = { nome, telefone, disponivelEm: null, ultimoUso: serverTimestamp(), criadoEm: serverTimestamp(), tokens: [] };
-    semEsperar(setDoc(meRef(), novo));
+    if (S.qrPendente) {
+      // Vai pegar um carro logo em seguida: o cadastro precisa estar salvo no servidor antes
+      ocupado("Salvando…");
+      if (!(await tentar(async () => { await setDoc(meRef(), novo); return true; }))) return;
+    } else semEsperar(setDoc(meRef(), novo));
     S.me = { id: S.user.uid, ...novo, ultimoUso: Date.now(), criadoEm: Date.now() };
     toast("Bem-vindo, " + primeiroNome(nome) + "!");
     ouvirMotorista();
     go(telaMotorista);
+    processarQRPendente();
   };
   $("#salvar").onclick = salvar;
   $("#nome").onkeydown = e => { if (e.key === "Enter") $("#tel").focus(); };
@@ -342,7 +389,7 @@ function telaMotorista() {
   S.live = true;
   const me = S.me;
   if (!me) return go(telaIdentificar);
-  topo("🧑‍✈️ " + primeiroNome(me.nome), [["Meus dados", () => go(telaIdentificar, true)], ["Trocar", trocarPerfil]]);
+  topo("🧑‍✈️ " + primeiroNome(me.nome), [["Meus dados", () => go(telaIdentificar, true)]]);
   const disponivel = me.disponivelEm === hoje();
   const u = S.usoAtivo;
   let h = "";
@@ -355,7 +402,8 @@ function telaMotorista() {
         <h2 style="font-size:22px;margin-bottom:2px">${esc(carro.nome)}</h2>
         <div class="muted">${esc(carro.placa || "")} · desde ${hora(u.inicio)}</div>
         <div class="gps" id="gpsStatus">${gpsTexto()}</div>
-        ${u.vistoriaRetirada ? "" : `<button class="btn warn" id="vistRet">📸 Fazer a vistoria de retirada (pendente)</button>`}
+        ${u.vistoriaRetirada ? "" : `<button class="btn warn" id="vistRet">📸 Fazer a vistoria de retirada (pendente)</button>
+          <button class="btn sec" id="cancelarRet">↩️ Cancelar retirada (peguei por engano)</button>`}
         <button class="btn ok" id="devolver">📷 Devolver o carro (ler QR Code)</button>
         ${C.whatsappCentral ? `<a class="btn sec" target="_blank" rel="noopener" href="${waLink(C.whatsappCentral, `Olá, aqui é ${me.nome}. Estou com o ${carro.nome} ${carro.placa || ""}.`)}">💬 Falar com a central</a>` : ""}
         <p class="muted center" style="margin-bottom:0">Deixe o app aberto enquanto estiver com o carro para a localização ser enviada.</p>
@@ -372,14 +420,14 @@ function telaMotorista() {
           : `<button class="btn ok big" id="toggle">✋ Estou disponível</button>`}
         <p class="muted center" style="margin:10px 0 0">Vale só para hoje. Amanhã é só apertar de novo.</p>
       </div>
-      <button class="btn big" id="pegar" style="margin-bottom:14px">📷 Pegar um carro (ler QR Code)</button>`;
+      <button class="btn big" id="pegar">📷 Pegar um carro (ler QR Code)</button>
+      <p class="muted center" style="margin:8px 0 14px">Dica: também dá para apontar a câmera normal do celular para o QR Code do carro.</p>`;
   }
 
   if (S.pushSuportado && !S.pushOk) {
     h += `<div class="card"><h2>🔔 Avisos de carro liberado</h2><p class="muted">Receba um aviso no celular quando um carro for liberado e você estiver disponível${messaging ? "" : " (com o app aberto ou minimizado)"}.</p><button class="btn sec" id="avisos">Ativar avisos</button></div>`;
-  } else if (!S.pushSuportado && /iphone|ipad|ipod/i.test(navigator.userAgent) && !navigator.standalone) {
-    h += `<p class="muted center">Para receber avisos no iPhone, instale o app: <b>Compartilhar → Adicionar à Tela de Início</b>.</p>`;
   }
+  h += cardInstalar();
 
   const livres = S.carros.filter(c => c.status === "disponivel");
   h += `<div class="card"><h2>Carros disponíveis (${livres.length})</h2>${livres.length ? `<ul class="list">${livres.map(c => {
@@ -398,6 +446,7 @@ function telaMotorista() {
     <button class="btn sec" id="reservar">Reservar um carro</button></div>`;
 
   app.innerHTML = h;
+  ligarInstalar();
   $("#toggle") && ($("#toggle").onclick = () => {
     semEsperar(updateDoc(meRef(), { disponivelEm: disponivel ? null : hoje(), ultimoUso: serverTimestamp() }));
     toast(disponivel ? "Marcado como indisponível" : "Pronto! Você está disponível");
@@ -405,6 +454,7 @@ function telaMotorista() {
   $("#pegar") && ($("#pegar").onclick = pegarCarro);
   $("#devolver") && ($("#devolver").onclick = devolverCarro);
   $("#vistRet") && ($("#vistRet").onclick = () => go(telaVistoria, { tipo: "retirada", carro: carroDoUso(u), usoId: u.id }));
+  $("#cancelarRet") && ($("#cancelarRet").onclick = () => cancelarRetirada(u));
   $("#avisos") && ($("#avisos").onclick = ativarAvisos);
   $("#reservar").onclick = () => go(telaReservar);
   $$("[data-cancelar]").forEach(b => b.onclick = () => {
@@ -420,13 +470,16 @@ function reservaDeOutro(carroId) {
   return S.reservas.find(r => r.carroId === carroId && r.motoristaId !== S.user.uid && ms(r.inicio) < agora + 3 * 3600000 && ms(r.fim) > agora);
 }
 
-async function pegarCarro() {
+// codigoLink: vem do QR Code lido pela câmera normal do celular (link #carro=CODIGO)
+async function pegarCarro(codigoLink) {
   if (S.usoAtivo) return toast("Você já está com um carro");
-  const cod = await lerQR("Leia o QR Code do carro");
+  const peloLink = typeof codigoLink === "string";
+  const cod = peloLink ? codigoLink : await lerQR("Leia o QR Code do carro");
   if (!cod) return;
   const carro = S.carros.find(c => c.codigo === cod);
-  if (!carro) return toast("Nenhum carro com o código " + cod);
-  if (carro.status !== "disponivel") return toast(`${carro.nome} não está disponível agora`);
+  if (!carro) return toast("Nenhum carro com o código " + cod, 4000);
+  if (carro.status !== "disponivel") return toast(`${carro.nome} não está disponível agora`, 4000);
+  if (peloLink && !confirm(`Pegar o carro ${carro.nome}${carro.placa ? " (" + carro.placa + ")" : ""}?`)) return;
   const r = reservaDeOutro(carro.id);
   if (r && !confirm(`${carro.nome} está reservado para ${r.motoristaNome} ${reservaTxt(r, false)}. Pegar mesmo assim?`)) return;
   if (!navigator.onLine) return toast("Você precisa de internet para pegar o carro");
@@ -451,10 +504,25 @@ async function pegarCarro() {
   go(telaVistoria, { tipo: "retirada", carro, usoId });
 }
 
-async function devolverCarro() {
+// Pegou o carro por engano (antes da vistoria): encerra o uso e o carro volta a ficar disponível
+function cancelarRetirada(u) {
+  const carro = carroDoUso(u);
+  if (u.vistoriaRetirada) return toast("A vistoria já foi feita. Use “Devolver o carro”.");
+  if (!confirm(`Cancelar a retirada do ${carro.nome}? Ele volta a ficar disponível.`)) return;
+  const b = writeBatch(db);
+  b.update(doc(db, "usos", u.id), { fim: serverTimestamp() });
+  b.update(doc(db, "carros", carro.id), { status: "disponivel", motoristaId: null, motoristaNome: null, usoId: null, desde: serverTimestamp() });
+  semEsperar(b.commit());
+  pararRastreio();
+  toast("Retirada cancelada");
+}
+
+async function devolverCarro(codigoLink) {
   const u = S.usoAtivo; if (!u) return;
   const carro = carroDoUso(u);
-  const cod = await lerQR("Leia o QR Code do " + carro.nome);
+  const peloLink = typeof codigoLink === "string";
+  if (peloLink && !confirm(`Devolver o carro ${carro.nome}${carro.placa ? " (" + carro.placa + ")" : ""}?`)) return;
+  const cod = peloLink ? codigoLink : await lerQR("Leia o QR Code do " + carro.nome);
   if (!cod) return;
   if (carro.codigo && cod !== carro.codigo) return toast("Esse QR Code é de outro carro");
   go(telaVistoria, { tipo: "devolucao", carro, usoId: u.id });
@@ -483,7 +551,9 @@ function lerQR(titulo) {
       v.length === 6 ? fim(v) : toast("O código tem 6 letras/números");
     };
     const ler = txt => {
-      const r = /^(?:FROTA:)?([A-Z0-9]{6})$/i.exec(String(txt).trim());
+      // Aceita o QR novo (link …#carro=CODIGO), o antigo (FROTA:CODIGO) ou só o código
+      const t = String(txt).trim();
+      const r = /#carro=([A-Z0-9]{6})$/i.exec(t) || /^(?:FROTA:)?([A-Z0-9]{6})$/i.exec(t);
       if (r) { navigator.vibrate?.(80); fim(r[1].toUpperCase()); }
     };
     if (!navigator.mediaDevices?.getUserMedia) { msg.textContent = "Câmera indisponível aqui. Digite o código abaixo."; return; }
@@ -846,7 +916,7 @@ function telaReservar() {
 
 /* ================== ADMINISTRADOR ================== */
 async function entrarAdmin() {
-  setLS("frota_modo", "admin");
+  pararRastreio();
   if (!S.user || S.user.isAnonymous) return go(telaLogin);
   ocupado("Carregando…");
   let ehAdmin;
@@ -859,13 +929,14 @@ async function entrarAdmin() {
     return go(telaLogin);
   }
   setLS("frota_admin_uid", S.user.uid);
+  setLS("frota_modo", "admin"); // daqui em diante este aparelho abre direto no painel
   S.admin = true;
   ouvirAdmin();
   go(telaAdmin);
 }
 
 function telaLogin() {
-  topo("🔒 Administrador", [["Voltar", () => { setLS("frota_modo", null); telaInicio(); }]]);
+  topo("🔒 Administrador", [["Sou motorista", () => { setLS("frota_modo", null); entrarMotorista(); }]]);
   app.innerHTML = `
     <div class="card">
       <h2>Entrar</h2>
@@ -1030,9 +1101,9 @@ function telaEtiquetas(carros) {
       <div class="etiqueta">
         <div class="et-nome">${esc(c.nome)}</div>
         <div class="et-placa">${esc(c.placa || "")}</div>
-        <img src="${qrDataURL("FROTA:" + c.codigo, 8)}" alt="QR Code">
+        <img src="${qrDataURL(linkCarro(c), 6)}" alt="QR Code">
         <div class="et-cod">${esc(c.codigo)}</div>
-        <div class="et-inst">Abra o app Frota e leia este código para pegar ou devolver o carro</div>
+        <div class="et-inst">Aponte a câmera do celular para pegar ou devolver este carro</div>
       </div>`).join("")}</div>`;
   $("#imprimir").onclick = () => window.print();
 }
@@ -1251,10 +1322,19 @@ function abaAjustes(el) {
       <button class="btn sec" id="limpar">🧹 Apagar fotos e vídeos antigos</button>
     </div>
     <div class="card">
+      <h2>Links do app</h2>
+      <p class="muted" style="margin-bottom:4px">Para os motoristas (abre direto como motorista):</p>
+      <input readonly value="${esc(linkBase())}" onclick="this.select()">
+      <p class="muted" style="margin-bottom:4px">Administrador (só para você; neste aparelho já abre direto no painel):</p>
+      <input readonly value="${esc(linkBase())}#admin" onclick="this.select()">
+      ${cardInstalar()}
+    </div>
+    <div class="card">
       <h2>Conta</h2>
       <p class="muted">Conectado como ${esc(S.user?.email || "")}. O login fica salvo neste aparelho.</p>
       <button class="btn bad" id="sair">Sair da administração</button>
     </div>`;
+  ligarInstalar();
   $("#saveDias").onclick = () => {
     const n = parseInt($("#dias").value, 10);
     if (!(n >= 1 && n <= 60)) return toast("Use entre 1 e 60 dias");
@@ -1285,8 +1365,8 @@ function abaAjustes(el) {
     pararOuvintes();
     await signOut(auth).catch(() => {});
     S.user = null; S.admin = false;
-    setLS("frota_modo", null); setLS("frota_admin_uid", null);
-    telaInicio();
+    setLS("frota_admin_uid", null);
+    go(telaLogin); // continua como aparelho de administrador; "Sou motorista" troca o perfil
   };
 }
 
