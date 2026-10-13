@@ -91,6 +91,58 @@
   .tabs { display: flex; gap: 6px; margin-bottom: 14px; overflow-x: auto; padding-bottom: 2px; }
   .tabs button { flex: 1 0 auto; border: 1px solid var(--line); background: var(--card); color: var(--text); padding: 10px 12px; border-radius: 10px; font-size: 14px; font-weight: 600; white-space: nowrap; cursor: pointer; }
   .tabs button.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .tabs .cont { font-size: 12px; background: var(--bg); color: var(--muted); border-radius: 99px; padding: 1px 8px; margin-left: 6px; }
+  .tabs button.on .cont { background: rgba(255,255,255,.25); color: #fff; }
+
+  /* Painel do administrador: tela larga no computador, com menu na lateral */
+  main.largo { max-width: 1240px; }
+  @media (min-width: 600px) and (max-width: 999px) { .painel > .tabs { flex-wrap: wrap; overflow: visible; } }
+  @media (min-width: 1000px) {
+    main.largo { padding: 22px 24px 40px; }
+    .painel { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; align-items: start; }
+    .painel > .tabs { flex-direction: column; overflow: visible; position: sticky; top: 84px; margin: 0; gap: 4px; }
+    .painel > .tabs button { flex: none; display: flex; justify-content: space-between; align-items: center; text-align: left; padding: 12px 14px; border-color: transparent; background: transparent; }
+    .painel > .tabs button:hover:not(.on) { background: var(--card); border-color: var(--line); }
+    .painel > .tabs button.on { background: var(--primary); }
+  }
+
+  /* Aba Início */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--cor, var(--primary)); border-radius: var(--radius); padding: 14px 16px; text-align: left; cursor: pointer; font-family: inherit; color: var(--text); transition: transform .12s, box-shadow .12s; }
+  .kpi:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,.08); }
+  .kpi .n { font-size: 32px; font-weight: 800; line-height: 1.1; color: var(--cor, var(--text)); }
+  .kpi .t { font-size: 14px; font-weight: 700; margin-top: 2px; }
+  .kpi .s { font-size: 12px; color: var(--muted); }
+  @media (max-width: 599px) {
+    .kpis { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .kpi { padding: 12px; }
+    .kpi .n { font-size: 26px; }
+    .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  }
+  .duas { display: grid; gap: 0 14px; }
+  @media (min-width: 900px) { .duas { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; } }
+  .barra { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin-bottom: 4px; }
+  .barra i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }
+  .passos li { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); cursor: pointer; }
+  .passos li:first-child { border-top: 0; }
+  .passos .tx { flex: 1; font-weight: 600; }
+  .passos .ck { width: 28px; height: 28px; flex: none; border-radius: 50%; border: 2px solid var(--primary); color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; }
+  .passos .feito { cursor: default; }
+  .passos .feito .ck { background: var(--ok); border-color: var(--ok); color: #fff; }
+  .passos .feito .tx { text-decoration: line-through; color: var(--muted); font-weight: 400; }
+  .numeros { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+  .numeros div { background: var(--bg); border-radius: 12px; padding: 10px; text-align: center; }
+  .numeros b { display: block; font-size: 24px; line-height: 1.2; }
+  .numeros span { font-size: 12px; color: var(--muted); }
+  .grafico svg { width: 100%; height: auto; max-height: 170px; display: block; }
+  .grafico rect { fill: var(--primary); }
+  .grafico text { fill: var(--muted); font-size: 7px; }
+  .tops { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+  .rank { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; font-size: 14px; }
+  .rank span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .eventos li { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .eventos li:first-child { border-top: 0; }
+  .eventos li .muted { white-space: nowrap; font-size: 12px; }
   .empty { text-align: center; color: var(--muted); padding: 18px 0; }
   .center { text-align: center; }
   .hidden { display: none !important; }
@@ -106,12 +158,17 @@
   .camera { position: relative; background: #000; border-radius: 12px; overflow: hidden; margin-bottom: 10px; aspect-ratio: 3 / 4; max-height: 55vh; width: 100%; }
   .camera video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .camera .mira { position: absolute; inset: 18%; border: 3px solid rgba(255,255,255,.85); border-radius: 16px; }
+  .camera.moldura { aspect-ratio: 4 / 3; }
+  .camera .contorno { position: absolute; left: 5%; top: 5%; width: 90%; height: 90%; fill: none; stroke: rgba(255,255,255,.92); stroke-width: 3; stroke-dasharray: 10 7; pointer-events: none; filter: drop-shadow(0 0 2px rgba(0,0,0,.9)); }
+  .camera .contorno text { fill: rgba(255,255,255,.92); stroke: none; font: 600 15px system-ui, sans-serif; }
   .camera .rec { position: absolute; top: 10px; left: 10px; background: var(--bad); color: #fff; padding: 4px 10px; border-radius: 99px; font-weight: 700; font-size: 14px; }
 
   /* Vistoria */
   .fotos { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-bottom: 10px; }
   .slot { border: 2px dashed var(--line); background: var(--bg); color: var(--text); border-radius: 12px; aspect-ratio: 4 / 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; padding: 6px; font-size: 13px; font-weight: 600; position: relative; overflow: hidden; font-family: inherit; }
   .slot .ph { font-size: 26px; }
+  .slot.sel { border-style: solid; border-color: var(--primary); background: var(--card); box-shadow: 0 0 0 2px var(--primary) inset; }
+  .olho { position: absolute; right: 4px; top: calc(50% - 5px); transform: translateY(-50%); border: 0; background: transparent; font-size: 20px; line-height: 1; padding: 8px; cursor: pointer; width: auto; margin: 0; }
   .slot.ok { border-style: solid; border-color: var(--ok); padding: 0; }
   .slot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   .slot.ok span:last-child { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.6); color: #fff; padding: 4px; }
@@ -150,9 +207,23 @@
   .video-qr { display: flex; gap: 12px; align-items: center; border: 1px solid #ccc; border-radius: 6px; padding: 8px; break-inside: avoid; }
   .video-qr img { width: 110px; height: 110px; image-rendering: pixelated; }
   .rodape { margin-top: 16px; }
+  .rel-cab { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; border-bottom: 3px solid #1f6feb; padding-bottom: 10px; margin-bottom: 14px; }
+  .rel-cab h1 { margin: 2px 0 0 !important; }
+  .rel-marca { font-size: 12px; font-weight: 700; color: #1f6feb; letter-spacing: .08em; text-transform: uppercase; }
+  .rel-sub { font-size: 15px; color: #333; margin-top: 2px; }
+  .rel-id { text-align: right; font-size: 12px; color: #555; white-space: nowrap; }
+  .folha { width: 100%; border-collapse: collapse; }
+  .folha > thead > tr > td, .folha > tfoot > tr > td, .folha > tbody > tr > td { padding: 0; border: 0; }
+  .folha-topo, .folha-pe { display: none; }
+  /* Relatório impresso sem o endereço do site, data e título que o navegador coloca nas bordas */
+  @page rel { size: A4; margin: 0; }
 
   @media print {
+    .relatorio { page: rel; padding: 0 14mm !important; }
+    .folha-topo { display: block; height: 12mm; }
+    .folha-pe { display: flex; justify-content: space-between; gap: 12px; margin-top: 6mm; padding: 3mm 0 8mm; border-top: 1px solid #ccc; font-size: 10px; color: #777; }
     header, .no-print, .toast, .tabs { display: none !important; }
+    .painel { display: block !important; }
     body { background: #fff; }
     main { max-width: none; padding: 0; }
     .card { border: 0; padding: 0; }
